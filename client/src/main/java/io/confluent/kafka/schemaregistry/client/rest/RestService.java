@@ -20,6 +20,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.util.concurrent.Uninterruptibles;
 
 import io.confluent.kafka.schemaregistry.client.SchemaRegistryClientConfig;
 import io.confluent.kafka.schemaregistry.client.rest.entities.Config;
@@ -50,6 +51,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.HttpsURLConnection;
@@ -151,6 +153,8 @@ public class RestService implements Configurable {
 
   public static final Map<String, String> DEFAULT_REQUEST_PROPERTIES;
 
+  private final int retryCount = 3;
+
   static {
     DEFAULT_REQUEST_PROPERTIES =
         Collections.singletonMap("Content-Type", Versions.SCHEMA_REGISTRY_V1_JSON_WEIGHTED);
@@ -234,6 +238,31 @@ public class RestService implements Configurable {
     this.hostnameVerifier = hostnameVerifier;
   }
 
+  private <T> T sendHttpRequest(String requestUrl, String method, byte[] requestBodyData,
+                                Map<String, String> requestProperties,
+                                TypeReference<T> responseFormat)
+          throws IOException, RestClientException {
+    T ret = null;
+    for (int i = 1; i <= retryCount; i++) {
+      try {
+        ret = doSendHttpRequest(requestUrl, method,
+                requestBodyData, requestProperties, responseFormat);
+        break;
+      } catch (Exception ex) {
+        if (i < retryCount) {
+          log.warn("Exception when sending request to schema registry {}, will retry",
+                  requestUrl, ex);
+          Uninterruptibles.sleepUninterruptibly(i * 200, TimeUnit.MILLISECONDS);
+        } else {
+          log.error("Exhausted retry when when sending request to schema registry {}",
+                  requestUrl, ex);
+          throw ex;
+        }
+      }
+    }
+    return ret;
+  }
+
   /**
    * @param requestUrl        HTTP connection will be established with this url.
    * @param method            HTTP method ("GET", "POST", "PUT", etc.)
@@ -243,7 +272,7 @@ public class RestService implements Configurable {
    * @param <T>               The type of the deserialized response to the HTTP request.
    * @return The deserialized response to the HTTP request, or null if no data is expected.
    */
-  private <T> T sendHttpRequest(String requestUrl, String method, byte[] requestBodyData,
+  private <T> T doSendHttpRequest(String requestUrl, String method, byte[] requestBodyData,
                                 Map<String, String> requestProperties,
                                 TypeReference<T> responseFormat)
       throws IOException, RestClientException {
